@@ -1,13 +1,10 @@
 ﻿using UnityEngine;
+using System;
 using System.Collections;
 
 public class TouchScript : MonoBehaviour {
-    
-    public UnityEngine.UI.Text hitText;
-    public Color hitTextColor;
-    private Material hitTextMaterial;
 
-    private Dot[] dots = new Dot[6];
+    public CombatPhaseManager combatPhaseManager;
 
     private bool isTouched = false;
 
@@ -16,6 +13,11 @@ public class TouchScript : MonoBehaviour {
     private Vector3 touchEnd;
 
     private LineRenderer liner;
+    private Phase prevPhase = Phase.NONE;
+
+    private int slashCount = 0;
+    private bool[] slices;
+    
 
 	// Use this for initialization
 	void Start () {
@@ -28,91 +30,61 @@ public class TouchScript : MonoBehaviour {
         liner.receiveShadows = false;
         liner.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         liner.SetColors(Color.grey, Color.white);
-        //liner.material = new Material(Shader.Find("Standard"));
         liner.material = new Material(Shader.Find("Particles/Additive"));
-
-
-        hitTextMaterial = hitText.material;
-        hitTextMaterial.color = hitTextColor;
+        
     }
 
     // Update is called once per frame
     void Update () {
-        if (dots[0] == null)
+        if (combatPhaseManager.CurrentPhase != Phase.PLAYER)
         {
-            // This is terrible, do it better after prototype.
-            for (int i = 0; i < 6; i++)
-            {
-                dots[i] = GameObject.Find("Dot" + i).GetComponent<Dot>();
-            }
+            prevPhase = combatPhaseManager.CurrentPhase;
+            return;
         }
 
+        if (prevPhase != Phase.PLAYER) // show once
+        {
+            slices = new bool[combatPhaseManager.GetOrders().Capacity];
+            combatPhaseManager.SetCombatText("Attack!", 0.5f);
+            prevPhase = Phase.PLAYER;
+        }
+        
         isTouched = IsTouched();
-
-        if (touchStart != nullVec3 && touchEnd != nullVec3)
-        {
-            liner.SetPosition(1, touchEnd);
-
-            RaycastHit2D[] lineCasts = Physics2D.LinecastAll(touchStart, touchEnd);
-
-            if (lineCasts.Length > 0)
-            {
-                foreach (RaycastHit2D rayHit in lineCasts)
-                {
-                    rayHit.collider.BroadcastMessage("OnTriggerEnter2D", rayHit.collider);
-                }
-            }
-
-            if (lineCasts.Length == 2) {
-                Debug.Log("Slice!");
-                hitText.text = "Slice!";
-                StartCoroutine(ReturnToEmptyText());
-            }
-            else
-            {
-                Debug.Log("Miss!");
-                hitText.text = "Miss!";
-                StartCoroutine(ReturnToEmptyText());
-            }
-
-        }
-
         if (!isTouched)
         {
-            //foreach (Dot dot in dots)
-            //    dot.IsActive = false;
-
             touchStart = nullVec3;
             touchEnd = nullVec3;
             return;
         }
-
-        
+              
 
         Touch touch = Input.GetTouch(0);
         
         Vector3 screenTouchPosition = touch.position;
         Vector3 worldPosition = Camera.main.ScreenToWorldPoint(screenTouchPosition);
         worldPosition.z = 0;
-        //sampleDot.transform.position = worldPosition;
 
         if (touchStart == nullVec3)
         {
-            //Debug.Log("set touchstart");
             touchStart = worldPosition;
-            liner.SetPosition(0, touchStart);
         }
-
-        liner.SetPosition(1, worldPosition);
 
         if (touch.phase == TouchPhase.Ended)
         {
-            //Debug.Log("set touchend");
             touchEnd = worldPosition;
-        }
 
-        //foreach (Dot dot in dots)
-        //    dot.IsActive = true;
+            bool didHit = ResolveSlice(touchStart, touchEnd);
+
+            slices[slashCount] = didHit;
+            slashCount++;
+
+            bool finished = slashCount == combatPhaseManager.GetOrders().Capacity;
+            if (finished)
+            {
+                StartCoroutine(DelayAction(ClearLine, 1));
+                StartCoroutine(DelayAction(EndPlayerPhase, 1));
+            }
+        }
 	}
 
     private bool IsTouched()
@@ -128,49 +100,90 @@ public class TouchScript : MonoBehaviour {
         return fingerCount > 0;
     }
 
-    IEnumerator ReturnToEmptyText()
+    private bool ResolveSlice(Vector3 touchStart, Vector3 touchEnd)
     {
-        for (float f = 1f; f > 0; f -= 0.05f)
+        liner.SetPosition(0, touchStart);
+        liner.SetPosition(1, touchEnd);
+
+        RaycastHit2D[] lineCastHits = Physics2D.LinecastAll(touchStart, touchEnd);
+
+        if (lineCastHits.Length > 0)
         {
-            Color c = hitText.material.color;
-            c.a = f;
-            hitText.material.color = c;
-            yield return new WaitForEndOfFrame();
+            foreach (RaycastHit2D rayHit in lineCastHits)
+            {
+                // Manually trigger collisions with any hit dots.
+                rayHit.collider.BroadcastMessage("OnTriggerEnter2D", rayHit.collider);
+            }
         }
 
-        hitText.text = "";
-        hitText.material.color = hitTextColor;
+        bool didHit = (lineCastHits.Length >= 2 && IsProperSlice(lineCastHits, slashCount));
 
-        //Color currColor = hitText.material.color;
-        //currColor.a -= 0.1f;
-        //hitText.material.color = currColor;
-        //Debug.Log(currColor.a);
-        //if (currColor.a > 0)
-        //{
-        //    yield return new WaitForEndOfFrame();
-        //}
+        string hitText = "";
+        if (didHit)
+            hitText = "Slice!";
+        else if (lineCastHits.Length == 2)
+            hitText = "Fumble!";
+        else
+            hitText = "Miss!";
 
-        //yield return new WaitForSeconds(0.3f);
-        //hitText.text = "";
-        //hitText.material.color = hitTextColor;
+        combatPhaseManager.SetCombatText(hitText, 0.5f);
+        return didHit;
     }
 
-    //void OnGUI()
-    //{
+    private bool IsProperSlice(RaycastHit2D[] hits, int slashCount)
+    {
+        if (hits.Length < 2)
+        {
+            Debug.Log("Not enough hits");
+            return false;
+        }
+        
+        Dot[] targetPair = combatPhaseManager.GetOrders()[slashCount];
 
-    //    if (touchStart != nullVec3 && touchEnd != nullVec3)
-    //        GUI.Label(new Rect(200, 100, 500, 100), "Line: (" + touchStart.x + "," + touchStart.y + " : " + touchEnd.x + ", " + touchEnd.y + ")");
+        GameObject hitA = hits[0].collider.gameObject;
+        GameObject hitB = hits[1].collider.gameObject;
+        GameObject targetA = targetPair[0].gameObject;
+        GameObject targetB = targetPair[1].gameObject;
 
-    //    foreach (Touch touch in Input.touches)
-    //    {
-    //        string msg = "";
-    //        msg += "ID: " + touch.fingerId + "\n";
-    //        msg += "Phase: " + touch.phase.ToString() + "\n";
-    //        msg += "TapCount: " + touch.tapCount + "\n";
-    //        msg += "Pos: (" + touch.position.x + ", " + touch.position.y + ")\n";
+        //Debug.Log("IDs :" +
+        //    hitA.GetInstanceID() + "/" +
+        //    hitB.GetInstanceID() + "/" +
+        //    targetA.GetInstanceID() + "/" +
+        //    targetB.GetInstanceID());
 
-    //        int num = touch.fingerId;
-    //        GUI.Label(new Rect(0 + 130 * num, 0, 120, 100), msg);
-    //    }
-    //}
+        bool dotAValid = hitA.Equals(targetA) || hitA.Equals(targetB);
+        bool dotBValid = hitB.Equals(targetA) || hitB.Equals(targetB);
+
+        //Debug.Log("dotAValid " + dotAValid);
+        //Debug.Log("dotBValid " + dotBValid);
+
+        return (dotAValid && dotBValid);
+    }
+
+    private void ClearLine()
+    {
+        liner.SetPosition(0, nullVec3);
+        liner.SetPosition(1, nullVec3);
+    }
+
+    private void Reset()
+    {
+        slashCount = 0;
+        slices = null;
+        ClearLine();
+        touchStart = nullVec3;
+        touchEnd = nullVec3;
+    }
+
+    private void EndPlayerPhase()
+    {
+        combatPhaseManager.SetResolvePlayerPhase(slices);
+        Reset();
+    }
+
+    IEnumerator DelayAction(Action cb, int delaySec)
+    {
+        yield return new WaitForSeconds(delaySec);
+        cb();
+    }
 }
